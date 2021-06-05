@@ -35,6 +35,7 @@
 #include <netinet/ip6.h>
 #include <netinet/udp.h>
 #include <netinet/ip_icmp.h>
+#include <netinet/icmp6.h>
 #include <netpacket/packet.h>
 #include <arpa/inet.h>
 #include <time.h>
@@ -133,6 +134,9 @@ int process_ip6_packet    (packet_t * packet,
 
 int process_icmp_packet  (packet_t * packet,
                           const struct icmphdr * icmp);
+
+int process_icmp6_packet  (packet_t * packet,
+                          const struct icmp6_hdr * icmp);
 
 int process_tcp_packet   (packet_t * packet,
                           const struct tcphdr * tcp,
@@ -306,6 +310,7 @@ void print_packet(const packet_t * packet, uint8_t * payload)
     int         is_unknown;
     int         is_tcp;
     int         is_icmp;
+    int         is_icmp6;
     uint32_t    i;
     uint8_t     c;
     const char *flags;
@@ -323,9 +328,10 @@ void print_packet(const packet_t * packet, uint8_t * payload)
         return;
     }
 
-    is_unknown = FALSE;
+    is_unknown  = FALSE;
     is_tcp      = FALSE;
     is_icmp     = FALSE;
+    is_icmp6    = FALSE;
 
     switch (packet->protocol) {
     case (IPPROTO_UDP):
@@ -338,6 +344,10 @@ void print_packet(const packet_t * packet, uint8_t * payload)
     case (IPPROTO_ICMP):
         is_icmp    = TRUE;
         proto_str  = "ICMP";
+        break;
+    case (IPPROTO_ICMPV6):
+        is_icmp6    = TRUE;
+        proto_str  = "ICMPv6";
         break;
     default:
         is_unknown = TRUE;
@@ -367,6 +377,21 @@ void print_packet(const packet_t * packet, uint8_t * payload)
             printf("ECHO REQUEST (PING REQ)\n");
             break;
         case (ICMP_ECHOREPLY):
+            printf("ECHO REPLY   (PING REPLY)\n");
+            break;
+        default:        
+            printf("type: %hu, code: %hu\n", packet->icmp_type,
+                                             packet->icmp_code);
+        }
+        return;
+    }
+    else if (is_icmp6) {
+        switch (packet->icmp_type) {
+
+        case (ICMP6_ECHO_REQUEST):
+            printf("ECHO REQUEST (PING REQ)\n");
+            break;
+        case (ICMP6_ECHO_REPLY):
             printf("ECHO REPLY   (PING REPLY)\n");
             break;
         default:        
@@ -426,6 +451,16 @@ process_icmp_packet  (packet_t * packet,
     return 0;
 }
 
+int
+process_icmp6_packet  (packet_t * packet,
+                      const struct icmp6_hdr * icmp)
+{
+    packet->icmp_type = icmp->icmp6_type;
+    packet->icmp_code = icmp->icmp6_code;
+
+    print_packet(packet, NULL);
+    return 0;
+}
 
 int
 process_tcp_packet(packet_t * packet,
@@ -629,9 +664,9 @@ process_ip6_packet(packet_t * packet,
             packet->vxlan = NO_VXLAN;
         return process_tcp_packet(packet, (const struct tcphdr *) ip_payload,
                                   tcpfilter);
-    case(IPPROTO_ICMP):
-        return process_icmp_packet(packet,
-                                   (const struct icmphdr *) ip_payload);
+    case(IPPROTO_ICMPV6):
+        return process_icmp6_packet(packet,
+                                   (const struct icmp6_hdr *) ip_payload);
     default:
         if (isprintall)
             print_packet(packet, NULL); /* Unknown protocol print */
