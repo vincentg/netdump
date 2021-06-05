@@ -228,7 +228,7 @@ void help(char *name, int retcode)
             "-u <port_list>|NONE ex: (see -t semantics)\n"
             "-X\t\tPrint packet content (useful for HTTP/Clear text protocols)\n"
             "-a\t\tPrint 'exotic' IP protocols (not TCP/UDP/ICMP)\n"
-            "-B\t\tignore all broadcast packets\n", name);
+            "-B\t\tignore all broadcast(multicasts in IPv6) packets\n", name);
     exit(retcode);
 }
 
@@ -622,7 +622,6 @@ process_ip_packet(packet_t * packet,
     }
 }
 
-
 int
 process_ip6_packet(packet_t * packet,
                   const struct ip6_hdr *ip,
@@ -632,15 +631,11 @@ process_ip6_packet(packet_t * packet,
 {
     int       ip_offset;
     void     *ip_payload;
-    struct    in6_addr broadcastip;
 
-    inet_pton(AF_INET6, "ff02::1", &broadcastip);
-
-    /* If broadcast filtering is enabled, filter out broadcast packets */
+    /* Broadcast is implemented with multicast in v6 */
     if (packet->vxlan != VNI_FRAME && bcast_filter) {
-        /* Also filter out 255.255.255.255 IP (0xFFFFFFFF) */
-        if (!memcmp(&broadcastip,&(ip->ip6_src),sizeof(struct in6_addr)) ||
-            !memcmp(&broadcastip,&(ip->ip6_dst),sizeof(struct in6_addr)))
+        if (IN6_IS_ADDR_MULTICAST(&ip->ip6_src) || 
+            IN6_IS_ADDR_MULTICAST(&ip->ip6_dst))
             return 0;
     }
 
@@ -673,8 +668,6 @@ process_ip6_packet(packet_t * packet,
         return 0;
     }
 }
-
-
 
 
 /*
