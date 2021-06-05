@@ -32,6 +32,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <netinet/ip.h>
+#include <netinet/ip6.h>
 #include <netinet/udp.h>
 #include <netinet/ip_icmp.h>
 #include <netpacket/packet.h>
@@ -71,11 +72,12 @@ struct packet {
     vxlan_t              vxlan;
     size_t               recv_len;
     size_t               headers_len;
-    char                 srcip[INET_ADDRSTRLEN];
-    char                 dstip[INET_ADDRSTRLEN];
+    uint16_t             l3_protocol; /* ETH_P_IP or ETH_P_IPV6 */
+    char                 srcip[INET6_ADDRSTRLEN];
+    char                 dstip[INET6_ADDRSTRLEN];
     char                 flags[4];              /* SYN|ACK|FIN|RST */
     uint16_t             source;                /* PORTS */
-    uint16_t             dest; 
+    uint16_t             dest;
     uint16_t             protocol;              /* IPPROT_UDP|TCP|ICMP */
     uint8_t              icmp_type;
     uint8_t              icmp_code;
@@ -122,6 +124,12 @@ int process_ip_packet    (packet_t * packet,
                           const portfilter_t * tcpfilter,
                           const portfilter_t * udpfilter,
                           const struct sockaddr_in *bcastfilter);
+
+int process_ip6_packet    (packet_t * packet,
+                          const struct ip6_hdr *ip,
+                          const portfilter_t * tcpfilter,
+                          const portfilter_t * udpfilter,
+                          int   bcast_filter);
 
 int process_icmp_packet  (packet_t * packet,
                           const struct icmphdr * icmp);
@@ -474,6 +482,7 @@ process_vxlan_packet(const packet_t *packet,
         (struct iphdr *) (vxlan_frame + VXLAN_HDR_SZ +
                           sizeof(struct ethhdr));
 
+    /* TODO Support IPv6 Inner frame */
     /* Loop back to process_ip_packet for child packet */
     return process_ip_packet(&vxpacket, vxip, NULL, NULL, NULL);
 }
@@ -579,6 +588,60 @@ process_ip_packet(packet_t * packet,
 }
 
 
+int
+process_ip6_packet(packet_t * packet,
+                  const struct ip6_hdr *ip,
+                  const portfilter_t * tcpfilter,
+                  const portfilter_t * udpfilter,
+                  int   bcast_filter)
+{
+    int       ip_offset;
+    void     *ip_payload;
+    struct    in6_addr broadcastip;
+
+    inet_pton(AF_INET6, "ff02::1", &broadcastip);
+
+    /* If broadcast filtering is enabled, filter out broadcast packets */
+    if (packet->vxlan != VNI_FRAME && bcast_filter) {
+        /* Also filter out 255.255.255.255 IP (0xFFFFFFFF) */
+        if (!memcmp(&broadcastip,&(ip->ip6_src),sizeof(struct in6_addr)) ||
+            !memcmp(&broadcastip,&(ip->ip6_dst),sizeof(struct in6_addr)))
+            return 0;
+    }
+
+    inet_ntop(AF_INET6, &ip->ip6_src, packet->srcip, sizeof(packet->srcip));
+    inet_ntop(AF_INET6, &ip->ip6_dst, packet->dstip, sizeof(packet->dstip));
+    /* Todo, support encapsulated ipv6 headers */
+    packet->protocol = ip->ip6_nxt;
+
+    ip_offset = 40; /* Fixed IPv6 header size */
+    ip_payload = (((uint8_t *) ip) + ip_offset);
+
+    packet->headers_len += ip_offset;
+
+    switch (packet->protocol) {
+
+    case(IPPROTO_UDP):
+        return process_udp_packet(packet, (const struct udphdr *) ip_payload,
+                                  udpfilter);
+    case(IPPROTO_TCP):
+        if (packet->vxlan == UNKNOWN)
+            packet->vxlan = NO_VXLAN;
+        return process_tcp_packet(packet, (const struct tcphdr *) ip_payload,
+                                  tcpfilter);
+    case(IPPROTO_ICMP):
+        return process_icmp_packet(packet,
+                                   (const struct icmphdr *) ip_payload);
+    default:
+        if (isprintall)
+            print_packet(packet, NULL); /* Unknown protocol print */
+        return 0;
+    }
+}
+
+
+
+
 /*
  * Signal handler to close cleanly 
  */
@@ -607,15 +670,16 @@ listenloop(int mtu, const portfilter_t * tcpfilter,
            const struct sockaddr_in *bcastfilter)
 {
     packet_t       packet;
-    struct iphdr  *ip;
+    struct iphdr    *ip;
+    struct ip6_hdr  *ip6;
     struct ethhdr *eth;
     uint8_t       *buffer;
     ssize_t        recv_slen;
+    uint16_t       l3_proto;
 
     fprintf(stdout, "[+] Listening started ...\n");
 
     buffer = (uint8_t *) malloc(mtu + 1);
-
     /*
      * Attach signal handler 
      */
@@ -632,21 +696,28 @@ listenloop(int mtu, const portfilter_t * tcpfilter,
 
         eth = (struct ethhdr *) buffer;
         /* Only analize IP Packet */
-        if (eth->h_proto != htons(ETH_P_IP))
-            continue;
+        l3_proto = ntohs(eth->h_proto);
+        if (l3_proto != ETH_P_IP && l3_proto != ETH_P_IPV6)
+            continue;		
 
         packet.vxlan       = UNKNOWN;
         packet.headers_len = sizeof(struct ethhdr);
+        packet.l3_protocol = l3_proto;
         packet.vxparent    = NULL;
         packet.source      = 0;
         packet.dest        = 0;
         packet.recv_len    = recv_slen;
-
-        ip = (struct iphdr *) (buffer + sizeof(struct ethhdr));
-        process_ip_packet(&packet, ip, tcpfilter, udpfilter, bcastfilter);
-
+        
+        if (l3_proto == ETH_P_IP) {
+            ip = (struct iphdr *) (buffer + sizeof(struct ethhdr));
+            process_ip_packet(&packet, ip, tcpfilter, udpfilter, bcastfilter);
+        }
+        else {
+            ip6 = (struct ip6_hdr *) (buffer + sizeof(struct ethhdr));
+            process_ip6_packet(&packet, ip6, tcpfilter, udpfilter, 
+                               bcastfilter ? 1 : 0);
+        }
     }
-
     return -1;                  /* Should never goes there, exit is by signal */
 }
 
@@ -745,7 +816,7 @@ int main(int argc, char **argv)
 
 
     if (bcf) {
-        if (get_broadcast_inet(psock, iface, &brcastfilter) < 0) {
+        if (get_broadcast_inet(psock, iface, &brcastfilter) <= 0) {
             fprintf(stderr,
                     "Unable to get interface (\"%s\") Broadcast address\n",
                     iface);
