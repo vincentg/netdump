@@ -224,11 +224,11 @@ void help(char *name, int retcode)
             "-i <interface>\tinterface to listen\n"
             "-p {0|1}\tpromiscious mode (0=0ff[DEFAULT] 1=On)\n"
             "-t <port_list>|NONE ex: -t 22,53,10,100 only show packets from/to theses TCP ports\n"
-            "                        -t NONE         do not show any TCP packet\n"
+            "                        -t NONE\tdo not show any TCP packet\n"
             "-u <port_list>|NONE ex: (see -t semantics)\n"
-            "-X\t\tPrint packet content (useful for HTTP/Clear text protocols)\n"
+            "-X\t\tPrint packet content (useful for Clear text protocols)\n"
             "-a\t\tPrint 'exotic' IP protocols (not TCP/UDP/ICMP)\n"
-            "-B\t\tignore all broadcast(multicasts in IPv6) packets\n", name);
+            "-B\t\tignore all broadcast(multicasts in IPv6) packets\n",name);
     exit(retcode);
 }
 
@@ -752,7 +752,7 @@ listenloop(int mtu, const portfilter_t * tcpfilter,
 
 int main(int argc, char **argv)
 {
-    char                 options;
+    int                  options;
     int                  promisc;
     int                  mtu;
     int                  ifidx;
