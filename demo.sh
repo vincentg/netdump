@@ -1,0 +1,28 @@
+#!/bin/bash
+# Demonstration script for the loopback deduplication fix
+# This would need to be run with sudo/root privileges to work with raw sockets
+
+echo "=== netdump Loopback Deduplication Fix Demonstration ==="
+echo ""
+echo "This fix addresses the issue where loopback packet monitoring shows duplicate output."
+echo ""
+echo "BEFORE the fix:"
+echo "- Each packet on loopback interface appears twice (sent + received)"
+echo "- A simple ping would show 4 packets instead of 2"
+echo ""
+echo "AFTER the fix:"
+echo "- Loopback interfaces are automatically detected"
+echo "- Duplicate packets are filtered using a hash-based cache"
+echo "- Only unique packets are displayed"
+echo ""
+echo "Example usage:"
+echo "  sudo ./netdump -i lo          # Monitor loopback with deduplication"
+echo "  sudo ./netdump -i eth0        # Monitor regular interface (no change)"
+echo ""
+echo "The fix maintains full backwards compatibility and only affects loopback interfaces."
+echo ""
+echo "Technical details:"
+echo "- Uses SIOCGIFFLAGS ioctl to detect IFF_LOOPBACK flag"
+echo "- Implements 16-entry circular cache with 2-second time window"
+echo "- Hash function based on packet size, ports, protocol, and IP addresses"
+echo "- Zero performance impact on non-loopback interfaces"
