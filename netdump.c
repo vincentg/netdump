@@ -51,6 +51,7 @@ int      isprintmsg;
 int      psock;
 uint8_t *buffer;
 char    *iface;
+int      is_loopback_iface;
 
 
 /* DATA STRUCTURES -------- */
@@ -87,6 +88,16 @@ struct packet {
 
 typedef struct packet packet_t;
 
+/* Simple packet deduplication for loopback interfaces */
+struct packet_cache {
+#define PACKET_CACHE_SIZE 16
+    uint32_t hashes[PACKET_CACHE_SIZE];
+    uint32_t timestamps[PACKET_CACHE_SIZE];
+    int      next_index;
+};
+
+typedef struct packet_cache packet_cache_t;
+
 struct portfilter {
 /* Limit port lists to 32 ports each 
  * -t <22,80,...>
@@ -114,6 +125,12 @@ int set_promisc        (int sockfd, char *iface, int type);
 int get_if_mtu         (int sockfd, char *iface);
 int get_if_idx         (int sockfd, char *iface);
 int get_broadcast_inet (int sockfd, char *iface, struct sockaddr_in *brcast);
+int is_loopback_interface (int sockfd, char *iface);
+
+uint32_t jenkins_hash   (const uint8_t *data, size_t len);
+uint32_t packet_hash    (const uint8_t *packet_data, size_t packet_len);
+int is_duplicate_packet (const packet_cache_t * cache, uint32_t hash);
+void cache_packet       (packet_cache_t * cache, uint32_t hash);
 
 void print_packet        (const packet_t * packet, uint8_t * payload);
 
@@ -240,7 +257,8 @@ int set_promisc(int sockfd, char *iface, int type)
 {
     struct ifreq ifr;
 
-    strncpy(ifr.ifr_name, iface, IFNAMSIZ);
+    strncpy(ifr.ifr_name, iface, IFNAMSIZ - 1);
+    ifr.ifr_name[IFNAMSIZ - 1] = '\0';
 
     if (ioctl(sockfd, SIOCGIFFLAGS, &ifr) < 0)
         return -1;
@@ -268,6 +286,8 @@ int get_if_mtu(int sockfd, char *iface)
     struct ifreq ifr;
 
     strncpy(ifr.ifr_name, iface, IFNAMSIZ - 1);
+    ifr.ifr_name[IFNAMSIZ - 1] = '\0';
+
     if (ioctl(sockfd, SIOCGIFMTU, &ifr) < 0)
         return -1;
     return ifr.ifr_mtu;
@@ -281,6 +301,8 @@ int get_if_idx(int sockfd, char *iface)
     struct ifreq ifr;
 
     strncpy(ifr.ifr_name, iface, IFNAMSIZ - 1);
+    ifr.ifr_name[IFNAMSIZ - 1] = '\0';
+
     if (ioctl(sockfd, SIOCGIFINDEX, &ifr) < 0)
         return -1;
     return ifr.ifr_ifindex;
@@ -294,11 +316,96 @@ int get_broadcast_inet(int sockfd, char *iface, struct sockaddr_in *brcast)
     struct ifreq ifr;
 
     strncpy(ifr.ifr_name, iface, IFNAMSIZ - 1);
+    ifr.ifr_name[IFNAMSIZ - 1] = '\0';
+
     if (ioctl(sockfd, SIOCGIFBRDADDR, &ifr) < 0)
         return 0;
     memcpy(brcast, (struct sockaddr_in *) &ifr.ifr_broadaddr,
            sizeof(struct sockaddr_in));
     return 1;
+}
+
+/*______________________________________________*\
+ *     Check if interface is loopback *
+\*______________________________________________*/
+int is_loopback_interface(int sockfd, char *iface)
+{
+    struct ifreq ifr;
+
+    strncpy(ifr.ifr_name, iface, IFNAMSIZ - 1);
+    ifr.ifr_name[IFNAMSIZ - 1] = '\0';
+
+    if (ioctl(sockfd, SIOCGIFFLAGS, &ifr) < 0)
+        return FALSE;
+    
+    return (ifr.ifr_flags & IFF_LOOPBACK) ? TRUE : FALSE;
+}
+
+/*______________________________________________*\
+ * Jenkins hash function for packet deduplication *
+\*______________________________________________*/
+uint32_t jenkins_hash(const uint8_t *data, size_t len)
+{
+    uint32_t hash = 0;
+    size_t i;
+    
+    for (i = 0; i < len; i++) {
+        hash += data[i];
+        hash += (hash << 10);
+        hash ^= (hash >> 6);
+    }
+    hash += (hash << 3);
+    hash ^= (hash >> 11);
+    hash += (hash << 15);
+    
+    return hash;
+}
+
+/*______________________________________________*\
+ * Hash function for packet deduplication using full packet data *
+\*______________________________________________*/
+uint32_t packet_hash(const uint8_t *packet_data, size_t packet_len)
+{
+    return jenkins_hash(packet_data, packet_len);
+}
+
+/*______________________________________________*\
+ * Check if packet is duplicate (for loopback) *
+\*______________________________________________*/
+int is_duplicate_packet(const packet_cache_t * cache, uint32_t hash)
+{
+    int i;
+    uint32_t current_time = (uint32_t)time(NULL);
+    
+    if (cache == NULL) {
+        return FALSE;
+    }
+    
+    /* Check if this hash was seen recently (within 2 seconds) */
+    for (i = 0; i < PACKET_CACHE_SIZE; i++) {
+        if (cache->hashes[i] == hash && 
+            (current_time - cache->timestamps[i]) <= 2) {
+            return TRUE;
+        }
+    }
+    
+    return FALSE;
+}
+
+/*______________________________________________*\
+ * Cache packet hash for deduplication *
+\*______________________________________________*/
+void cache_packet(packet_cache_t * cache, uint32_t hash)
+{
+    uint32_t current_time = (uint32_t)time(NULL);
+    
+    if (cache == NULL) {
+        return;
+    }
+    
+    cache->hashes[cache->next_index] = hash;
+    cache->timestamps[cache->next_index] = current_time;
+    cache->next_index = (cache->next_index + 1) % PACKET_CACHE_SIZE;
 }
 
 void print_packet(const packet_t * packet, uint8_t * payload)
@@ -704,6 +811,7 @@ listenloop(int mtu, const portfilter_t * tcpfilter,
     uint8_t       *buffer;
     ssize_t        recv_slen;
     uint16_t       l3_proto;
+    static packet_cache_t cache = {{0}, {0}, 0}; /* Static cache for deduplication */
 
     fprintf(stdout, "[+] Listening started ...\n");
 
@@ -727,6 +835,15 @@ listenloop(int mtu, const portfilter_t * tcpfilter,
         l3_proto = ntohs(eth->h_proto);
         if (l3_proto != ETH_P_IP && l3_proto != ETH_P_IPV6)
             continue;		
+
+        /* For loopback interfaces, check for duplicates using full packet data */
+        if (is_loopback_iface) {
+            uint32_t packet_hash_value = packet_hash(buffer, recv_slen);
+            if (is_duplicate_packet(&cache, packet_hash_value)) {
+                continue; /* Skip duplicate packet */
+            }
+            cache_packet(&cache, packet_hash_value);
+        }
 
         packet.vxlan       = UNKNOWN;
         packet.headers_len = sizeof(struct ethhdr);
@@ -769,6 +886,7 @@ int main(int argc, char **argv)
     isprintall = FALSE;
     isprintmsg = FALSE;
     promisc    = FALSE;
+    is_loopback_iface = FALSE;
 
     if (argc <= 2)
         help(argv[0], -1);
@@ -841,6 +959,12 @@ int main(int argc, char **argv)
     bind(psock, (struct sockaddr *) &sll, sizeof(sll));
 
     fprintf(stdout, "[+] SOCKET bound to interface (\"%s\") OK\n", iface);
+
+    /* Check if interface is loopback */
+    is_loopback_iface = is_loopback_interface(psock, iface);
+    if (is_loopback_iface) {
+        fprintf(stdout, "[+] Loopback interface detected, enabling packet deduplication\n");
+    }
 
 
     if (bcf) {
