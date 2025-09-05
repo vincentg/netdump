@@ -128,9 +128,10 @@ int get_if_idx         (int sockfd, char *iface);
 int get_broadcast_inet (int sockfd, char *iface, struct sockaddr_in *brcast);
 int is_loopback_interface (int sockfd, char *iface);
 
-uint32_t packet_hash    (const packet_t * packet);
-int is_duplicate_packet (packet_cache_t * cache, const packet_t * packet);
-void cache_packet       (packet_cache_t * cache, const packet_t * packet);
+uint32_t jenkins_hash   (const uint8_t *data, size_t len);
+uint32_t packet_hash    (const uint8_t *packet_data, size_t packet_len);
+int is_duplicate_packet (packet_cache_t * cache, uint32_t hash);
+void cache_packet       (packet_cache_t * cache, uint32_t hash);
 
 void print_packet        (const packet_t * packet, uint8_t * payload);
 
@@ -333,37 +334,40 @@ int is_loopback_interface(int sockfd, char *iface)
 }
 
 /*______________________________________________*\
- * Simple hash function for packet deduplication *
+ * Jenkins hash function for packet deduplication *
 \*______________________________________________*/
-uint32_t packet_hash(const packet_t * packet)
+uint32_t jenkins_hash(const uint8_t *data, size_t len)
 {
     uint32_t hash = 0;
-    int i;
+    size_t i;
     
-    /* Hash based on key packet characteristics */
-    hash ^= packet->recv_len;
-    hash ^= (packet->source << 16) | packet->dest;
-    hash ^= packet->protocol;
-    
-    /* Hash source and dest IP strings */
-    for (i = 0; packet->srcip[i] != '\0' && i < INET6_ADDRSTRLEN; i++) {
-        hash = hash * 31 + packet->srcip[i];
+    for (i = 0; i < len; i++) {
+        hash += data[i];
+        hash += (hash << 10);
+        hash ^= (hash >> 6);
     }
-    for (i = 0; packet->dstip[i] != '\0' && i < INET6_ADDRSTRLEN; i++) {
-        hash = hash * 31 + packet->dstip[i];
-    }
+    hash += (hash << 3);
+    hash ^= (hash >> 11);
+    hash += (hash << 15);
     
     return hash;
 }
 
 /*______________________________________________*\
+ * Hash function for packet deduplication using full packet data *
+\*______________________________________________*/
+uint32_t packet_hash(const uint8_t *packet_data, size_t packet_len)
+{
+    return jenkins_hash(packet_data, packet_len);
+}
+
+/*______________________________________________*\
  * Check if packet is duplicate (for loopback) *
 \*______________________________________________*/
-int is_duplicate_packet(packet_cache_t * cache, const packet_t * packet)
+int is_duplicate_packet(packet_cache_t * cache, uint32_t hash)
 {
     int i;
     uint32_t current_time = (uint32_t)time(NULL);
-    uint32_t hash = packet_hash(packet);
     
     /* Check if this hash was seen recently (within 2 seconds) */
     for (i = 0; i < PACKET_CACHE_SIZE; i++) {
@@ -379,9 +383,8 @@ int is_duplicate_packet(packet_cache_t * cache, const packet_t * packet)
 /*______________________________________________*\
  * Cache packet hash for deduplication *
 \*______________________________________________*/
-void cache_packet(packet_cache_t * cache, const packet_t * packet)
+void cache_packet(packet_cache_t * cache, uint32_t hash)
 {
-    uint32_t hash = packet_hash(packet);
     uint32_t current_time = (uint32_t)time(NULL);
     
     cache->hashes[cache->next_index] = hash;
@@ -402,19 +405,10 @@ void print_packet(const packet_t * packet, uint8_t * payload)
     uint32_t    i;
     uint8_t     c;
     const char *flags;
-    static packet_cache_t cache = {{0}, {0}, 0}; /* Static cache for deduplication */
 
     /* For VXLAN VNI packet that got there (not filtered) print top frame */
     if (packet->vxlan == VNI_FRAME)
         print_packet(packet->vxparent, NULL);
-
-    /* For loopback interfaces, check for duplicates */
-    if (is_loopback_iface && packet->source != 0 && packet->dest != 0) {
-        if (is_duplicate_packet(&cache, packet)) {
-            return; /* Skip duplicate packet */
-        }
-        cache_packet(&cache, packet);
-    }
 
     time(&timer);
     tm_info = localtime(&timer);
@@ -801,6 +795,7 @@ listenloop(int mtu, const portfilter_t * tcpfilter,
     uint8_t       *buffer;
     ssize_t        recv_slen;
     uint16_t       l3_proto;
+    static packet_cache_t cache = {{0}, {0}, 0}; /* Static cache for deduplication */
 
     fprintf(stdout, "[+] Listening started ...\n");
 
@@ -824,6 +819,15 @@ listenloop(int mtu, const portfilter_t * tcpfilter,
         l3_proto = ntohs(eth->h_proto);
         if (l3_proto != ETH_P_IP && l3_proto != ETH_P_IPV6)
             continue;		
+
+        /* For loopback interfaces, check for duplicates using full packet data */
+        if (is_loopback_iface) {
+            uint32_t packet_hash_value = packet_hash(buffer, recv_slen);
+            if (is_duplicate_packet(&cache, packet_hash_value)) {
+                continue; /* Skip duplicate packet */
+            }
+            cache_packet(&cache, packet_hash_value);
+        }
 
         packet.vxlan       = UNKNOWN;
         packet.headers_len = sizeof(struct ethhdr);
