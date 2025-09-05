@@ -84,7 +84,6 @@ struct packet {
     uint8_t              icmp_type;
     uint8_t              icmp_code;
     const struct packet *vxparent;
-    uint32_t             packet_hash;           /* Hash for deduplication */
 };
 
 typedef struct packet packet_t;
@@ -130,7 +129,7 @@ int is_loopback_interface (int sockfd, char *iface);
 
 uint32_t jenkins_hash   (const uint8_t *data, size_t len);
 uint32_t packet_hash    (const uint8_t *packet_data, size_t packet_len);
-int is_duplicate_packet (packet_cache_t * cache, uint32_t hash);
+int is_duplicate_packet (const packet_cache_t * cache, uint32_t hash);
 void cache_packet       (packet_cache_t * cache, uint32_t hash);
 
 void print_packet        (const packet_t * packet, uint8_t * payload);
@@ -373,10 +372,14 @@ uint32_t packet_hash(const uint8_t *packet_data, size_t packet_len)
 /*______________________________________________*\
  * Check if packet is duplicate (for loopback) *
 \*______________________________________________*/
-int is_duplicate_packet(packet_cache_t * cache, uint32_t hash)
+int is_duplicate_packet(const packet_cache_t * cache, uint32_t hash)
 {
     int i;
     uint32_t current_time = (uint32_t)time(NULL);
+    
+    if (cache == NULL) {
+        return FALSE;
+    }
     
     /* Check if this hash was seen recently (within 2 seconds) */
     for (i = 0; i < PACKET_CACHE_SIZE; i++) {
@@ -395,6 +398,10 @@ int is_duplicate_packet(packet_cache_t * cache, uint32_t hash)
 void cache_packet(packet_cache_t * cache, uint32_t hash)
 {
     uint32_t current_time = (uint32_t)time(NULL);
+    
+    if (cache == NULL) {
+        return;
+    }
     
     cache->hashes[cache->next_index] = hash;
     cache->timestamps[cache->next_index] = current_time;
@@ -845,7 +852,6 @@ listenloop(int mtu, const portfilter_t * tcpfilter,
         packet.source      = 0;
         packet.dest        = 0;
         packet.recv_len    = recv_slen;
-        packet.packet_hash = 0; /* Initialize hash */
         
         if (l3_proto == ETH_P_IP) {
             ip = (struct iphdr *) (buffer + sizeof(struct ethhdr));
