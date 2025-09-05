@@ -51,6 +51,7 @@ int      isprintmsg;
 int      psock;
 uint8_t *buffer;
 char    *iface;
+int      is_loopback_iface;
 
 
 /* DATA STRUCTURES -------- */
@@ -83,9 +84,20 @@ struct packet {
     uint8_t              icmp_type;
     uint8_t              icmp_code;
     const struct packet *vxparent;
+    uint32_t             packet_hash;           /* Hash for deduplication */
 };
 
 typedef struct packet packet_t;
+
+/* Simple packet deduplication for loopback interfaces */
+struct packet_cache {
+#define PACKET_CACHE_SIZE 16
+    uint32_t hashes[PACKET_CACHE_SIZE];
+    uint32_t timestamps[PACKET_CACHE_SIZE];
+    int      next_index;
+};
+
+typedef struct packet_cache packet_cache_t;
 
 struct portfilter {
 /* Limit port lists to 32 ports each 
@@ -114,6 +126,11 @@ int set_promisc        (int sockfd, char *iface, int type);
 int get_if_mtu         (int sockfd, char *iface);
 int get_if_idx         (int sockfd, char *iface);
 int get_broadcast_inet (int sockfd, char *iface, struct sockaddr_in *brcast);
+int is_loopback_interface (int sockfd, char *iface);
+
+uint32_t packet_hash    (const packet_t * packet);
+int is_duplicate_packet (packet_cache_t * cache, const packet_t * packet);
+void cache_packet       (packet_cache_t * cache, const packet_t * packet);
 
 void print_packet        (const packet_t * packet, uint8_t * payload);
 
@@ -301,6 +318,77 @@ int get_broadcast_inet(int sockfd, char *iface, struct sockaddr_in *brcast)
     return 1;
 }
 
+/*______________________________________________*\
+ *     Check if interface is loopback *
+\*______________________________________________*/
+int is_loopback_interface(int sockfd, char *iface)
+{
+    struct ifreq ifr;
+
+    strncpy(ifr.ifr_name, iface, IFNAMSIZ - 1);
+    if (ioctl(sockfd, SIOCGIFFLAGS, &ifr) < 0)
+        return FALSE;
+    
+    return (ifr.ifr_flags & IFF_LOOPBACK) ? TRUE : FALSE;
+}
+
+/*______________________________________________*\
+ * Simple hash function for packet deduplication *
+\*______________________________________________*/
+uint32_t packet_hash(const packet_t * packet)
+{
+    uint32_t hash = 0;
+    int i;
+    
+    /* Hash based on key packet characteristics */
+    hash ^= packet->recv_len;
+    hash ^= (packet->source << 16) | packet->dest;
+    hash ^= packet->protocol;
+    
+    /* Hash source and dest IP strings */
+    for (i = 0; packet->srcip[i] != '\0' && i < INET6_ADDRSTRLEN; i++) {
+        hash = hash * 31 + packet->srcip[i];
+    }
+    for (i = 0; packet->dstip[i] != '\0' && i < INET6_ADDRSTRLEN; i++) {
+        hash = hash * 31 + packet->dstip[i];
+    }
+    
+    return hash;
+}
+
+/*______________________________________________*\
+ * Check if packet is duplicate (for loopback) *
+\*______________________________________________*/
+int is_duplicate_packet(packet_cache_t * cache, const packet_t * packet)
+{
+    int i;
+    uint32_t current_time = (uint32_t)time(NULL);
+    uint32_t hash = packet_hash(packet);
+    
+    /* Check if this hash was seen recently (within 2 seconds) */
+    for (i = 0; i < PACKET_CACHE_SIZE; i++) {
+        if (cache->hashes[i] == hash && 
+            (current_time - cache->timestamps[i]) <= 2) {
+            return TRUE;
+        }
+    }
+    
+    return FALSE;
+}
+
+/*______________________________________________*\
+ * Cache packet hash for deduplication *
+\*______________________________________________*/
+void cache_packet(packet_cache_t * cache, const packet_t * packet)
+{
+    uint32_t hash = packet_hash(packet);
+    uint32_t current_time = (uint32_t)time(NULL);
+    
+    cache->hashes[cache->next_index] = hash;
+    cache->timestamps[cache->next_index] = current_time;
+    cache->next_index = (cache->next_index + 1) % PACKET_CACHE_SIZE;
+}
+
 void print_packet(const packet_t * packet, uint8_t * payload)
 {
     time_t      timer;
@@ -314,10 +402,19 @@ void print_packet(const packet_t * packet, uint8_t * payload)
     uint32_t    i;
     uint8_t     c;
     const char *flags;
+    static packet_cache_t cache = {{0}, {0}, 0}; /* Static cache for deduplication */
 
     /* For VXLAN VNI packet that got there (not filtered) print top frame */
     if (packet->vxlan == VNI_FRAME)
         print_packet(packet->vxparent, NULL);
+
+    /* For loopback interfaces, check for duplicates */
+    if (is_loopback_iface && packet->source != 0 && packet->dest != 0) {
+        if (is_duplicate_packet(&cache, packet)) {
+            return; /* Skip duplicate packet */
+        }
+        cache_packet(&cache, packet);
+    }
 
     time(&timer);
     tm_info = localtime(&timer);
@@ -735,6 +832,7 @@ listenloop(int mtu, const portfilter_t * tcpfilter,
         packet.source      = 0;
         packet.dest        = 0;
         packet.recv_len    = recv_slen;
+        packet.packet_hash = 0; /* Initialize hash */
         
         if (l3_proto == ETH_P_IP) {
             ip = (struct iphdr *) (buffer + sizeof(struct ethhdr));
@@ -769,6 +867,7 @@ int main(int argc, char **argv)
     isprintall = FALSE;
     isprintmsg = FALSE;
     promisc    = FALSE;
+    is_loopback_iface = FALSE;
 
     if (argc <= 2)
         help(argv[0], -1);
@@ -841,6 +940,12 @@ int main(int argc, char **argv)
     bind(psock, (struct sockaddr *) &sll, sizeof(sll));
 
     fprintf(stdout, "[+] SOCKET bound to interface (\"%s\") OK\n", iface);
+
+    /* Check if interface is loopback */
+    is_loopback_iface = is_loopback_interface(psock, iface);
+    if (is_loopback_iface) {
+        fprintf(stdout, "[+] Loopback interface detected, enabling packet deduplication\n");
+    }
 
 
     if (bcf) {
