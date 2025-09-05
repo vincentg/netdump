@@ -258,7 +258,8 @@ int set_promisc(int sockfd, char *iface, int type)
 {
     struct ifreq ifr;
 
-    strncpy(ifr.ifr_name, iface, IFNAMSIZ);
+    strncpy(ifr.ifr_name, iface, IFNAMSIZ - 1);
+    ifr.ifr_name[IFNAMSIZ - 1] = '\0';
 
     if (ioctl(sockfd, SIOCGIFFLAGS, &ifr) < 0)
         return -1;
@@ -286,6 +287,8 @@ int get_if_mtu(int sockfd, char *iface)
     struct ifreq ifr;
 
     strncpy(ifr.ifr_name, iface, IFNAMSIZ - 1);
+    ifr.ifr_name[IFNAMSIZ - 1] = '\0';
+
     if (ioctl(sockfd, SIOCGIFMTU, &ifr) < 0)
         return -1;
     return ifr.ifr_mtu;
@@ -299,6 +302,8 @@ int get_if_idx(int sockfd, char *iface)
     struct ifreq ifr;
 
     strncpy(ifr.ifr_name, iface, IFNAMSIZ - 1);
+    ifr.ifr_name[IFNAMSIZ - 1] = '\0';
+
     if (ioctl(sockfd, SIOCGIFINDEX, &ifr) < 0)
         return -1;
     return ifr.ifr_ifindex;
@@ -312,6 +317,8 @@ int get_broadcast_inet(int sockfd, char *iface, struct sockaddr_in *brcast)
     struct ifreq ifr;
 
     strncpy(ifr.ifr_name, iface, IFNAMSIZ - 1);
+    ifr.ifr_name[IFNAMSIZ - 1] = '\0';
+
     if (ioctl(sockfd, SIOCGIFBRDADDR, &ifr) < 0)
         return 0;
     memcpy(brcast, (struct sockaddr_in *) &ifr.ifr_broadaddr,
@@ -327,6 +334,8 @@ int is_loopback_interface(int sockfd, char *iface)
     struct ifreq ifr;
 
     strncpy(ifr.ifr_name, iface, IFNAMSIZ - 1);
+    ifr.ifr_name[IFNAMSIZ - 1] = '\0';
+
     if (ioctl(sockfd, SIOCGIFFLAGS, &ifr) < 0)
         return FALSE;
     
